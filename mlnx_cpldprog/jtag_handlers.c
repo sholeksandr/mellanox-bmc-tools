@@ -40,15 +40,14 @@
 #include <malloc.h>
 #include <fcntl.h>
 #include <time.h>
-#ifndef DISABLE_JTAG_PROG
-#include <uapi/linux/aspeed-jtag.h>
+#include <uapi/linux/jtag.h>
 #include <uapi/linux/ioctl.h>
-#endif
 #include "vmopcode.h"
 #include "utilities.h"
 #include "jtag_handlers.h"
 
-#define JTAG_DEBUG_LEVEL 0
+#define JTAG_DEBUG	1
+
 typedef struct {
 	char cmd;
 	enum jtag_data_state_e{
@@ -171,6 +170,8 @@ static int ScanTokenMax = sizeof( scanTokens ) / sizeof( scanTokens[ 0 ] );
 
 extern int g_JTAGFile;
 extern char g_direct_prog;
+extern char g_debug;
+
 unsigned short g_usCpu_Frequency  = 300;   /*Enter your CPU frequency here, unit in MHz.*/
 write_handler_data_t g_write_handler_data;
 
@@ -299,7 +300,7 @@ static void extract_bitbuffer(char *in_buf, int inbuf_len,
 
 static int jtag_sir_xfer(void)
 {
-	struct aspeed_jtag_sir_xfer xfer;
+	struct jtag_xfer xfer;
 	char *mask_p = NULL;
 	char *tdo_p = NULL;
 	int TDO_expected = 0;
@@ -312,11 +313,13 @@ static int jtag_sir_xfer(void)
 	int *tdo_data;
 
 	memset(&xfer, 0 ,sizeof(xfer));
-#if JTAG_DEBUG_LEVEL > 0
-	printf("JTAG SIR_CMD\n");
-	jtag_print_xfer(&g_transaction_data[HIR_TRAILER], 0);
-	jtag_print_xfer(&g_transaction_data[SIR_DATA_TR], 0);
-	jtag_print_xfer(&g_transaction_data[TIR_TRAILER], 0);
+#if (JTAG_DEBUG != 0)
+	if (g_debug > 0) {
+		printf("JTAG SIR_CMD\n");
+		jtag_print_xfer(&g_transaction_data[HIR_TRAILER], 0);
+		jtag_print_xfer(&g_transaction_data[SIR_DATA_TR], 0);
+		jtag_print_xfer(&g_transaction_data[TIR_TRAILER], 0);
+	}
 #endif
 
 	merge_bitbuffer(g_transaction_data[HIR_TRAILER].tdi, g_transaction_data[HIR_TRAILER].bit_size,
@@ -326,20 +329,27 @@ static int jtag_sir_xfer(void)
 	tdo_p = g_transaction_data[SIR_DATA_TR].tdo;
 	mask_p = g_transaction_data[SIR_DATA_TR].mask;
 
-	xfer.mode = ASPEED_JTAG_XFER_SW_MODE;
-	xfer.tdi = ((unsigned int*)g_bitbuf)[0];
+	xfer.mode = JTAG_XFER_SW_MODE;
+	xfer.type = JTAG_SIR_XFER;
+	xfer.tdio = g_bitbuf;
 	xfer.length = g_bitbuf_pos;
 
-#ifndef DISABLE_JTAG_PROG
-	xfer.endir = ASPEED_JTAG_STATE_IDLE;
-	ioctl(g_JTAGFile, ASPEED_JTAG_IOCSIR, &xfer);
-#endif
+	if (tdo_p)
+		xfer.direction = JTAG_READ_XFER;
+	else
+		xfer.direction = JTAG_WRITE_XFER;
+
+	xfer.endstate = JTAG_STATE_IDLE;
+
+	usleep(25*1000);
+	ioctl(g_JTAGFile, JTAG_IOCXFER, &xfer);
+	usleep(25*1000);
 
 	/* check tdo */
 	if (tdo_p){
 		tdo_data = tdo_data_buf;
 
-		extract_bitbuffer((char *)&xfer.tdo, xfer.length,
+		extract_bitbuffer(xfer.tdio, xfer.length,
 						g_transaction_data[HIR_TRAILER].bit_size,
 						(char *)tdo_data,
 						g_transaction_data[SIR_DATA_TR].bit_size,
@@ -355,9 +365,11 @@ static int jtag_sir_xfer(void)
 
 		TDO_expected = char2int(&tdo_p, bit_remaining);
 
-#if JTAG_DEBUG_LEVEL > 1
-		printf("SIR Check mask TDO_real 0x%08x MASK 0x%08x TDO_expect 0x%08x\n",
-				*tdo_data, MASK_data, TDO_expected);
+#if (JTAG_DEBUG != 0)
+		if (g_debug > 1) {
+			printf("SIR Check mask TDO_real 0x%08x MASK 0x%08x TDO_expect 0x%08x\n",
+					*tdo_data, MASK_data, TDO_expected);
+		}
 #endif
 		for (i = 0; i < bit_remaining; i++) {
 			CurBit = *tdo_data & (1 << i) ? 1 : 0;
@@ -375,7 +387,7 @@ static int jtag_sir_xfer(void)
 
 static int jtag_sdr_xfer(void)
 {
-	struct aspeed_jtag_sdr_xfer xfer;
+	struct jtag_xfer xfer;
 	char *mask_p = NULL;
 	char *tdo_p = NULL;
 	int TDO_expected = 0;
@@ -388,11 +400,13 @@ static int jtag_sdr_xfer(void)
 	int tdo_data_buf[64];	/*buffer to store received tdo data*/
 	int *tdo_data;
 
-#if JTAG_DEBUG_LEVEL > 0
-	printf("JTAG SDR_CMD\n");
-	jtag_print_xfer(&g_transaction_data[HDR_TRAILER], 0);
-	jtag_print_xfer(&g_transaction_data[SDR_DATA_TR], 0);
-	jtag_print_xfer(&g_transaction_data[TDR_TRAILER], 0);
+#if (JTAG_DEBUG != 0)
+	if (g_debug > 0) {
+		printf("JTAG SDR_CMD\n");
+		jtag_print_xfer(&g_transaction_data[HDR_TRAILER], 0);
+		jtag_print_xfer(&g_transaction_data[SDR_DATA_TR], 0);
+		jtag_print_xfer(&g_transaction_data[TDR_TRAILER], 0);
+	}
 #endif
 	memset(&xfer, 0 ,sizeof(xfer));
 
@@ -403,25 +417,27 @@ static int jtag_sdr_xfer(void)
 	tdo_p = g_transaction_data[SDR_DATA_TR].tdo;
 	mask_p = g_transaction_data[SDR_DATA_TR].mask;
 
-	xfer.mode = ASPEED_JTAG_XFER_SW_MODE;
-	xfer.tdio = (unsigned int*)g_bitbuf;
+	xfer.mode = JTAG_XFER_SW_MODE;
+	xfer.type = JTAG_SDR_XFER;
+	xfer.tdio = g_bitbuf;
 	xfer.length = g_bitbuf_pos;
 
 	if (tdo_p)
-		xfer.direct = 0;
+		xfer.direction = JTAG_READ_XFER;
 	else
-		xfer.direct = 1;
+		xfer.direction = JTAG_WRITE_XFER;
 
-#ifndef DISABLE_JTAG_PROG
-	xfer.enddr = ASPEED_JTAG_STATE_IDLE;
-	ioctl(g_JTAGFile, ASPEED_JTAG_IOCSDR, &xfer);
-#endif
+	xfer.endstate = JTAG_STATE_IDLE;
+
+	usleep(25*1000);
+	ioctl(g_JTAGFile, JTAG_IOCXFER, &xfer);
+	usleep(25*1000);
 
 	/* check tdo */
 	if (tdo_p){
 		tdo_data = tdo_data_buf;
 
-		extract_bitbuffer(	(char *)xfer.tdio, xfer.length,
+		extract_bitbuffer(	xfer.tdio, xfer.length,
 							g_transaction_data[HDR_TRAILER].bit_size,
 							(char *)tdo_data,
 							g_transaction_data[SDR_DATA_TR].bit_size,
@@ -445,9 +461,11 @@ static int jtag_sdr_xfer(void)
 
 			TDO_expected = char2int(&tdo_p, bit_remaining);
 
-#if JTAG_DEBUG_LEVEL > 1
-			printf("SDR Check mask TDO_real 0x%08x MASK 0x%08x TDO_expect 0x%08x\n",
-					*tdo_data, MASK_data, TDO_expected);
+#if (JTAG_DEBUG != 0)
+			if (g_debug > 0) {
+				printf("SDR Check mask TDO_real 0x%08x MASK 0x%08x TDO_expect 0x%08x\n",
+						*tdo_data, MASK_data, TDO_expected);
+			}
 #endif
 
 			for (i = 0; i < bit_remaining; i++) {
@@ -505,32 +523,33 @@ static int jtag_set_transaction_data(jtag_handler_data_t * data_p,
 
 static int jtag_runtest_xfer(runtest_handler_data_t * data_p)
 {
-	struct aspeed_jtag_runtest_idle runtest;
+	struct jtag_run_test_idle runtest;
 	unsigned short delay = 0;
 	unsigned short loop_index = 0;
 	unsigned short ms_index = 0;
 	unsigned short us_index = 0;
 	unsigned short g_usCpu_Frequency = 150;
 
-#if JTAG_DEBUG_LEVEL > 0
-	printf("RUNTEST_CMD\n");
-	if (data_p->new_state != (char)0xff)
-		printf("State:%d\n", data_p->new_state);
+#if (JTAG_DEBUG != 0)
+	if (g_debug > 0) {
+		printf("RUNTEST_CMD\n");
+		if (data_p->new_state != (char)0xff)
+			printf("State:%d\n", data_p->new_state);
 
-	if (data_p->end_state != (char)0xff)
-		printf("End state:%d\n", data_p->end_state);
+		if (data_p->end_state != (char)0xff)
+			printf("End state:%d\n", data_p->end_state);
 
-	printf("TCK:%d\n", data_p->tck);
+		printf("TCK:%d\n", data_p->tck);
+	}
 #endif
-
 	if (data_p->tck){
-		runtest.mode = ASPEED_JTAG_XFER_SW_MODE;
-		runtest.end = 0;	/*IDLE*/
+		runtest.mode = JTAG_XFER_SW_MODE;
+		runtest.endstate = JTAG_STATE_IDLE;	/*IDLE*/
 		runtest.reset = 0;
 		runtest.tck = data_p->tck;
-#ifndef DISABLE_JTAG_PROG
-		ioctl(g_JTAGFile, ASPEED_JTAG_IOCRUNTEST, &runtest);
-#endif
+		usleep(25*1000);
+		ioctl(g_JTAGFile, JTAG_IOCRUNTEST, &runtest);
+		usleep(25*1000);
 	}
 
 	if (data_p->wait){
@@ -545,8 +564,10 @@ static int jtag_runtest_xfer(runtest_handler_data_t * data_p)
 				delay  = 1; /*delay is 1 millisecond minimum*/
 			}
 		}
-#if JTAG_DEBUG_LEVEL > 0
-		printf("WAIT %d ms\n", delay);
+#if (JTAG_DEBUG != 0)
+		if (g_debug > 0) {
+			printf("WAIT %d ms\n", delay);
+		}
 #endif
 		/*Users can replace the following section of code by their own*/
 			for( ms_index = 0; ms_index < delay; ms_index++)
@@ -577,8 +598,10 @@ int jtag_cmd_handler(unsigned char cmd, char data)
 
 	data_p = &g_write_handler_data.sir_sdr_data;
 
-#if JTAG_DEBUG_LEVEL > 2
-	printf(">jtag_cmd_handler(%s) %x\n", write_handler_cmd_str[cmd], data);
+#if (JTAG_DEBUG != 0)
+	if (g_debug > 2) {
+		printf(">jtag_cmd_handler(%s) %x\n", write_handler_cmd_str[cmd], data);
+	}
 #endif
 	if (cmd == WRITE_HANDLER_INIT_CMD){
 		memset(data_p, 0, sizeof(*data_p));
@@ -615,8 +638,10 @@ int jtag_cmd_handler(unsigned char cmd, char data)
 
 	switch (data_p->state){
 		case JTAG_IDLE:
-#if JTAG_DEBUG_LEVEL > 2
-			printf("state:JTAG_IDLE\n");
+#if (JTAG_DEBUG != 0)
+			if (g_debug > 2) {
+				printf("state:JTAG_IDLE\n");
+			}
 #endif
 			/* wait for opcode data*/
 			if (data == data_p->cmd)
@@ -624,8 +649,10 @@ int jtag_cmd_handler(unsigned char cmd, char data)
 
 			break;
 		case JTAG_CMD:
-#if JTAG_DEBUG_LEVEL > 2
-			printf("state:JATG_CMD\n");
+#if (JTAG_DEBUG != 0)
+			if (g_debug > 2) {
+				printf("state:JATG_CMD\n");
+			}
 #endif
 			/* receive num bites */
 
@@ -635,13 +662,17 @@ int jtag_cmd_handler(unsigned char cmd, char data)
 			} else {
 				data_p->state = JTAG_TOKEN;
 			}
-#if JTAG_DEBUG_LEVEL > 2
-			printf("size:%d\n", data_p->bit_size);
+#if (JTAG_DEBUG != 0)
+			if (g_debug > 2) {
+				printf("size:%d\n", data_p->bit_size);
+			}
 #endif
 			break;
 		case JTAG_TOKEN:
-#if JTAG_DEBUG_LEVEL > 2
-			printf("state:JTAG_TOKEN -> %s\n", get_token_str(data));
+#if (JTAG_DEBUG != 0)
+			if (g_debug > 2) {
+				printf("state:JTAG_TOKEN -> %s\n", get_token_str(data));
+			}
 #endif
 			data_p->state = JTAG_BYTE;
 			data_p->data_pos = 0;
@@ -685,8 +716,10 @@ int jtag_cmd_handler(unsigned char cmd, char data)
 			data_p->data_pos += 8;
 
 			if (data_p->data_pos >= data_p->bit_size){
-#if JTAG_DEBUG_LEVEL > 2
-				printf("data_pos:%d size:%d\n", data_p->data_pos, data_p->bit_size);
+#if (JTAG_DEBUG != 0)
+				if (g_debug > 2) {
+					printf("data_pos:%d size:%d\n", data_p->data_pos, data_p->bit_size);
+				}
 #endif
 				data_p->state = JTAG_TOKEN;
 			}
@@ -741,8 +774,10 @@ int runtest_handler(unsigned char cmd, char data)
 		return 0;
 
 	data_p = &g_write_handler_data.runtest_data;
-#if JTAG_DEBUG_LEVEL > 2
-	printf(">runtest_handler(%d) %x\n", cmd, data);
+#if (JTAG_DEBUG != 0)
+	if (g_debug > 2) {
+		printf(">runtest_handler(%d) %x\n", cmd, data);
+	}
 #endif
 	if (cmd == WRITE_HANDLER_INIT_CMD){
 		memset(data_p, 0, sizeof(*data_p));
@@ -788,8 +823,10 @@ int runtest_handler(unsigned char cmd, char data)
 						break;
 				}
 			}
-#if JTAG_DEBUG_LEVEL > 2
-			printf("data: %d\n", data_p->data);
+#if JTAG_DEBUG	> 0
+			if (g_debug > 2) {
+				printf("data: %d\n", data_p->data);
+			}
 #endif
 			break;
 		case RUNTEST_ERR:
