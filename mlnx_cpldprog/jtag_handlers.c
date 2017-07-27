@@ -31,22 +31,30 @@
  * POSSIBILITY OF SUCH DAMAGE.
  */
 
-
-
 #include <stdio.h>
 #include <stdlib.h>
+#include <stdint.h>
+#include <unistd.h>
 #include <ctype.h>
 #include <string.h>
 #include <malloc.h>
 #include <fcntl.h>
 #include <time.h>
+#include <sys/ioctl.h>
+#include <sys/types.h>
 #include <uapi/linux/jtag.h>
-#include <uapi/linux/ioctl.h>
 #include "vmopcode.h"
 #include "utilities.h"
 #include "jtag_handlers.h"
 
 #define JTAG_DEBUG	1
+
+#define HIR_TRAILER	0
+#define HDR_TRAILER	1
+#define TIR_TRAILER	2
+#define TDR_TRAILER	3
+#define SIR_DATA_TR	4
+#define SDR_DATA_TR	5
 
 typedef struct {
 	char cmd;
@@ -67,12 +75,6 @@ typedef struct {
 	unsigned int data_pos;
 	char size_shift;
 } jtag_handler_data_t;
-
-
-typedef struct {
-
-
-} frq_handler_data_t;
 
 typedef struct {
 	enum runtest_state_e{
@@ -100,21 +102,20 @@ typedef struct {
 
 typedef struct {
 	jtag_handler_data_t sir_sdr_data;
-	frq_handler_data_t  frq_data;
 	runtest_handler_data_t runtest_data;
 } write_handler_data_t;
 
-#define HIR_TRAILER	0
-#define HDR_TRAILER	1
-#define TIR_TRAILER	2
-#define TDR_TRAILER	3
-#define SIR_DATA_TR	4
-#define SDR_DATA_TR	5
+extern int g_JTAGFile;
+extern char g_direct_prog;
 
+write_handler_data_t g_write_handler_data;
 jtag_transaction_t g_transaction_data[6];
 
-static char g_bitbuf[256];
+static char g_bitbuf[1024];
 static unsigned int g_bitbuf_pos = 0;
+
+#if (JTAG_DEBUG != 0)
+extern char g_debug;
 
 char *write_handler_cmd_str[] = {"WRITE_HANDLER_INIT_CMD",
 				"WRITE_HANDLER_BYTE_CMD",
@@ -168,13 +169,6 @@ static struct scanToken
 
 static int ScanTokenMax = sizeof( scanTokens ) / sizeof( scanTokens[ 0 ] );
 
-extern int g_JTAGFile;
-extern char g_direct_prog;
-extern char g_debug;
-
-unsigned short g_usCpu_Frequency  = 300;   /*Enter your CPU frequency here, unit in MHz.*/
-write_handler_data_t g_write_handler_data;
-
 char * get_token_str(char token){
 	int i;
 	for (i=0; i<ScanTokenMax; i++){
@@ -212,9 +206,27 @@ void jtag_print_xfer(jtag_transaction_t * data_p, int more_data){
 	}
 }
 
+void jtag_print_xfer_raw(struct jtag_xfer * xfer){
+	int i;
+	unsigned char * data;
+	data = (void*)(unsigned int)xfer->tdio;
+
+	printf("XFER %s(%s) len: %d\n[",
+			(xfer->type == JTAG_SIR_XFER)  ? "SIR" : "SDR",
+			(xfer->direction == JTAG_READ_XFER)  ? "IN" : "OUT",
+			xfer->length);
+	for (i = xfer->length; i>0; i -= 8)
+		printf("%02X ", data[(i-1) / 8]);
+	printf("]\n");
+}
+#endif
+
 static int char2int(char ** data_p, int bit_size){
+	long int data_o;
 	int size;
-	int data_o=0;
+
+	if (bit_size > 32)
+			return 0;
 
 	size = (bit_size+7) / 8;
 	memcpy(&data_o, *data_p, size);
@@ -223,15 +235,14 @@ static int char2int(char ** data_p, int bit_size){
 }
 
 static void put_bitbuffer(char *data, unsigned int bit_size){
-	unsigned int bit_pos = 0;
-	unsigned char bit_offset = 0;
-	unsigned char byte_offset = 0;
 	unsigned char data_bit_offset = 0;
+	unsigned char byte_offset;
+	unsigned char bit_offset;
+	unsigned int bit_pos;
 
 	byte_offset = g_bitbuf_pos / 8;
 	bit_offset = g_bitbuf_pos % 8;
-	for (bit_pos = 0; bit_pos < bit_size; bit_pos++)
-	{
+	for (bit_pos = 0; bit_pos < bit_size; bit_pos++) {
 		g_bitbuf[byte_offset] &= ~(1<<bit_offset);
 		g_bitbuf[byte_offset] |= *data & (1<<data_bit_offset) ? (1<<bit_offset) : 0;
 		bit_offset++;
@@ -249,7 +260,7 @@ static void put_bitbuffer(char *data, unsigned int bit_size){
 	}
 }
 
-static void merge_bitbuffer( char *head, int head_len,
+static void merge_bitbuffer(char *head, int head_len,
 							char *data, int data_len,
 							char *tail, int tail_len)
 {
@@ -266,12 +277,12 @@ static void extract_bitbuffer(char *in_buf, int inbuf_len,
 							char *data, int data_len,
 							int tail_len)
 {
-	unsigned int bit_pos = 0;
-	unsigned char bit_offset = 0;	/* bit pos in input data*/
-	unsigned char byte_offset = 0;	/* byte pos in input data*/
-	unsigned char data_bit_offset = 0; /*bit pos in output_data*/
+	unsigned int  bit_pos = 0;
+	unsigned char bit_offset;	/* bit pos in input data*/
+	unsigned char byte_offset;	/* byte pos in input data*/
+	unsigned char data_bit_offset; /*bit pos in output_data*/
 
-	/* HDR */
+	/* HxR */
 	bit_pos += head_len;
 	bit_offset = head_len;
 	byte_offset = bit_offset/8;
@@ -279,9 +290,8 @@ static void extract_bitbuffer(char *in_buf, int inbuf_len,
 	data_bit_offset = 0;
 	in_buf += byte_offset;
 
-	/* SDR */
-	while (bit_pos < (inbuf_len - tail_len))
-	{
+	/* SxR */
+	while (bit_pos < (inbuf_len - tail_len)) {
 		*data &= ~(1<<data_bit_offset);
 		*data |= *in_buf & (1<<bit_offset) ? (1<<data_bit_offset) : 0;
 		data_bit_offset++;
@@ -301,16 +311,16 @@ static void extract_bitbuffer(char *in_buf, int inbuf_len,
 static int jtag_sir_xfer(void)
 {
 	struct jtag_xfer xfer;
-	char *mask_p = NULL;
-	char *tdo_p = NULL;
-	int TDO_expected = 0;
-	int bit_remaining = 0;
-	int MASK_data = 0xffffffff;
-	char CurBit = 0;
-	int i;
-	int ret = 0;
 	int tdo_data_buf[16];	/*buffer to store received tdo data*/
+	int bit_remaining;
+	int TDO_expected;
 	int *tdo_data;
+	int MASK_data;
+	char CurBit;
+	char *mask_p;
+	char *tdo_p;
+	int ret = 0;
+	int i;
 
 	memset(&xfer, 0 ,sizeof(xfer));
 #if (JTAG_DEBUG != 0)
@@ -329,9 +339,8 @@ static int jtag_sir_xfer(void)
 	tdo_p = g_transaction_data[SIR_DATA_TR].tdo;
 	mask_p = g_transaction_data[SIR_DATA_TR].mask;
 
-	xfer.mode = JTAG_XFER_SW_MODE;
 	xfer.type = JTAG_SIR_XFER;
-	xfer.tdio = g_bitbuf;
+	xfer.tdio = (__u64)g_bitbuf;
 	xfer.length = g_bitbuf_pos;
 
 	if (tdo_p)
@@ -341,15 +350,29 @@ static int jtag_sir_xfer(void)
 
 	xfer.endstate = JTAG_STATE_IDLE;
 
-	usleep(25*1000);
+#if (JTAG_DEBUG != 0)
+	if (g_debug > 0) {
+		printf("\n========================\n");
+		jtag_print_xfer_raw(&xfer);
+	}
+	usleep(25 * 1000);
+#endif
+
 	ioctl(g_JTAGFile, JTAG_IOCXFER, &xfer);
-	usleep(25*1000);
+
+#if (JTAG_DEBUG != 0)
+	usleep(25 * 1000);
+	if (g_debug > 0) {
+		jtag_print_xfer_raw(&xfer);
+		printf("========================\n\n");
+	}
+#endif
 
 	/* check tdo */
 	if (tdo_p){
 		tdo_data = tdo_data_buf;
 
-		extract_bitbuffer(xfer.tdio, xfer.length,
+		extract_bitbuffer((char *)(uintptr_t)xfer.tdio, xfer.length,
 						g_transaction_data[HIR_TRAILER].bit_size,
 						(char *)tdo_data,
 						g_transaction_data[SIR_DATA_TR].bit_size,
@@ -380,7 +403,6 @@ static int jtag_sir_xfer(void)
 				}
 			}
 		}
-
 	}
 	return ret;
 }
@@ -388,17 +410,17 @@ static int jtag_sir_xfer(void)
 static int jtag_sdr_xfer(void)
 {
 	struct jtag_xfer xfer;
-	char *mask_p = NULL;
-	char *tdo_p = NULL;
-	int TDO_expected = 0;
-	int bit_pos = 0;
-	int bit_remaining = 0;
-	int MASK_data = 0xffffffff;
-	char CurBit = 0;
-	int i;
-	int ret = 0;
 	int tdo_data_buf[64];	/*buffer to store received tdo data*/
+	int bit_remaining;
+	int TDO_expected;
+	int MASK_data;
 	int *tdo_data;
+	char *mask_p;
+	char *tdo_p;
+	int bit_pos;
+	char CurBit;
+	int ret = 0;
+	int i;
 
 #if (JTAG_DEBUG != 0)
 	if (g_debug > 0) {
@@ -417,27 +439,38 @@ static int jtag_sdr_xfer(void)
 	tdo_p = g_transaction_data[SDR_DATA_TR].tdo;
 	mask_p = g_transaction_data[SDR_DATA_TR].mask;
 
-	xfer.mode = JTAG_XFER_SW_MODE;
 	xfer.type = JTAG_SDR_XFER;
-	xfer.tdio = g_bitbuf;
+	xfer.tdio = (__u64)g_bitbuf;
 	xfer.length = g_bitbuf_pos;
 
 	if (tdo_p)
 		xfer.direction = JTAG_READ_XFER;
 	else
 		xfer.direction = JTAG_WRITE_XFER;
-
 	xfer.endstate = JTAG_STATE_IDLE;
 
-	usleep(25*1000);
-	ioctl(g_JTAGFile, JTAG_IOCXFER, &xfer);
-	usleep(25*1000);
+#if (JTAG_DEBUG != 0)
+	if (g_debug > 1) {
+		printf("========================\n");
+		jtag_print_xfer_raw(&xfer);
+	}
+	usleep(25 * 1000);
+#endif
 
+	ioctl(g_JTAGFile, JTAG_IOCXFER, &xfer);
+
+#if (JTAG_DEBUG != 0)
+	usleep(25 * 1000);
+	if (g_debug > 1) {
+		jtag_print_xfer_raw(&xfer);
+		printf("========================\n");
+	}
+#endif
 	/* check tdo */
 	if (tdo_p){
 		tdo_data = tdo_data_buf;
 
-		extract_bitbuffer(	xfer.tdio, xfer.length,
+		extract_bitbuffer(	(char*)(uintptr_t)xfer.tdio, xfer.length,
 							g_transaction_data[HDR_TRAILER].bit_size,
 							(char *)tdo_data,
 							g_transaction_data[SDR_DATA_TR].bit_size,
@@ -472,14 +505,13 @@ static int jtag_sdr_xfer(void)
 				CurBit = *tdo_data & (1 << i) ? 1 : 0;
 
 				if (MASK_data & (1<<i)) {
-					if (CurBit != (TDO_expected & (1 << i) ? 1 : 0)){
+					if (CurBit != (TDO_expected & (1 << i) ? 1 : 0))
 						ret = -1;
-					}
 				}
 			}
 			tdo_data++;
 		}
-		}
+	}
 	return ret;
 }
 
@@ -487,7 +519,7 @@ static int jtag_set_transaction_data(jtag_handler_data_t * data_p,
 									unsigned char type)
 {
 	jtag_transaction_t *transacrtion_data_p = &g_transaction_data[type];
-	unsigned int size = 0;
+	unsigned int size;
 
 	if (transacrtion_data_p->tdi){
 		free(transacrtion_data_p->tdi);
@@ -524,11 +556,10 @@ static int jtag_set_transaction_data(jtag_handler_data_t * data_p,
 static int jtag_runtest_xfer(runtest_handler_data_t * data_p)
 {
 	struct jtag_run_test_idle runtest;
-	unsigned short delay = 0;
-	unsigned short loop_index = 0;
-	unsigned short ms_index = 0;
-	unsigned short us_index = 0;
-	unsigned short g_usCpu_Frequency = 150;
+	unsigned short delay;
+	unsigned short loop_index;
+	unsigned short ms_index;
+	unsigned short us_index;
 
 #if (JTAG_DEBUG != 0)
 	if (g_debug > 0) {
@@ -543,13 +574,12 @@ static int jtag_runtest_xfer(runtest_handler_data_t * data_p)
 	}
 #endif
 	if (data_p->tck){
-		runtest.mode = JTAG_XFER_SW_MODE;
-		runtest.endstate = JTAG_STATE_IDLE;	/*IDLE*/
+		runtest.endstate = JTAG_STATE_IDLE;
 		runtest.reset = 0;
 		runtest.tck = data_p->tck;
-		usleep(25*1000);
+		usleep(25 * 1000);
 		ioctl(g_JTAGFile, JTAG_IOCRUNTEST, &runtest);
-		usleep(25*1000);
+		usleep(25 * 1000);
 	}
 
 	if (data_p->wait){
@@ -579,10 +609,9 @@ static int jtag_runtest_xfer(runtest_handler_data_t * data_p)
 					do {
 						/*The NOP fakes the optimizer out so that it doesn't toss out the loop code entirely*/
 						asm("NOP");
-					}while (loop_index++ < ((g_usCpu_Frequency/8)+(+ ((g_usCpu_Frequency % 8) ? 1 : 0))));
+					}while (loop_index++ < ((DELAY_CPU_SCALE/8)+(+ ((DELAY_CPU_SCALE % 8) ? 1 : 0))));
 				}
 			}
-
 	}
 
 	return 0;
@@ -590,8 +619,8 @@ static int jtag_runtest_xfer(runtest_handler_data_t * data_p)
 
 int jtag_cmd_handler(unsigned char cmd, char data)
 {
-	int ret = 0;
 	jtag_handler_data_t * data_p;
+	int ret = 0;
 
 	if (!g_direct_prog)
 		return 0;
@@ -757,18 +786,10 @@ int null_handler(unsigned char cmd, char data)
 	return 0;
 }
 
-int frequency_handler(unsigned char cmd, char data)
-{
-	if (!g_direct_prog)
-		return 0;
-
-	return 0;
-}
-
 int runtest_handler(unsigned char cmd, char data)
 {
-	int ret = 0;
 	runtest_handler_data_t * data_p;
+	int ret = 0;
 
 	if (!g_direct_prog)
 		return 0;

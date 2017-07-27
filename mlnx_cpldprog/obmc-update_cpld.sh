@@ -57,7 +57,7 @@ echo out > $GPIO_PATH/$GPIO_PIN0/direction
 echo out > $GPIO_PATH/$GPIO_PIN1/direction
 echo 0 > $GPIO_PATH/$GPIO_PIN0/value
 echo 1 > $GPIO_PATH/$GPIO_PIN1/value
-mlnx_cpldprog -infile $1 -prog $JTAG_IF
+mlnx_cpldprog -d -d -infile $1 -prog $JTAG_IF
 
 if [ CPLD_FIRMWARE_BKP = 1 ]; then
 	#create buckup file

@@ -66,12 +66,15 @@
 
 #include <stdio.h>
 #include <stdlib.h>
+#include <stdint.h>
 #include <ctype.h>
 #include <string.h>
 #include <malloc.h>
 #include <fcntl.h>
 #include <sys/stat.h>
-#include <uapi/linux/ioctl.h>
+#include <sys/ioctl.h>
+#include <sys/types.h>
+#include <linux/types.h>
 #include <uapi/linux/jtag.h>
 #include "vmopcode.h"
 #include "utilities.h"
@@ -2382,7 +2385,6 @@ short int convertToispSTREAM(long int numbits, unsigned char *data_buf, char opt
 	int FFcount;
 	int bytes;
 	int i;
-	int j;
 	char opt;
 	char mode;
 	unsigned char cur_char;
@@ -2395,7 +2397,6 @@ short int convertToispSTREAM(long int numbits, unsigned char *data_buf, char opt
 		bytes = numbits / 8;
 	}
 	opt = options;
-	j = 0;
 	mode = 0;
 
 	/* Determine the compression mode recommended */
@@ -3127,26 +3128,15 @@ int main( int argc, char *argv[] )
 	jtag_handlers_init();
 
 	if (g_direct_prog){
-
-		printf( "+====================+\n" );
-		printf( "| g_direct_prog RUN! |\n" );
-		printf( "+====================+\n\n" );
 		sleep(1);
 
-		iFullVMEOption = 1;
-
 		JTAGfrq = 20000;
-		usleep(25*1000);
 		ioctl(g_JTAGFile, JTAG_SIOCFREQ, &JTAGfrq);
-		usleep(25*1000);
 
 		runtest.endstate = 0;
-		runtest.mode = JTAG_XFER_SW_MODE;
 		runtest.reset = 0;
 		runtest.tck = 0;
-		usleep(25*1000);
 		ioctl(g_JTAGFile, JTAG_IOCRUNTEST, &runtest);
-		usleep(25*1000);
 	}
 
 	if ( iFullVMEOption ) {
